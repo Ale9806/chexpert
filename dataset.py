@@ -24,11 +24,12 @@ class ChexpertSmall(Dataset):
     # select only the competition labels
     attr_names = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Pleural Effusion']
 
-    def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None):
+    def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None,return_path=False):
         self.root = os.path.expanduser(root)
         self.transform = transform
         assert mode in ['train', 'valid', 'test', 'vis']
         self.mode = mode
+        self.return_path = return_path
 
         # if mode is test; root is path to csv file (in test mode), construct dataset from this csv;
         # if mode is train/valid; root is path to data folder with `train`/`valid` csv file to construct dataset.
@@ -86,6 +87,9 @@ class ChexpertSmall(Dataset):
         idx = self.data.index[idx]  # idx is based on len(self.data); if we are taking a subset of the data, idx will be relative to len(subset);
                                     # self.data.index(idx) pulls the index in the original dataframe and not the subset
 
+        if self.return_path:
+            img = img_path 
+            
         return img, attr, idx
 
     def __len__(self):
@@ -196,6 +200,8 @@ if __name__ == '__main__':
             img, attr, patient_id = ds[i]
             save_image(img, 'test_valid_dataset_image_{}.png'.format(i), normalize=True, scale_each=True)
             print('Patient id: {}; labels: {}'.format(patient_id, attr))
+
+        #import pdb;pdb.set_trace()
 
     if False:
         ds = ChexpertSmall(root=args.data_dir, mode='train', transform=T.Compose([T.CenterCrop(320), T.ToTensor()]))

@@ -145,6 +145,23 @@ def compute_metrics(outputs, targets, losses):
 
     return metrics
 
+def compute_all_metrics(outputs, targets):
+    n_classes = outputs.shape[1]
+    fpr, tpr, aucs, precision, recall = {}, {}, {}, {}, {}
+    for i in range(n_classes):
+        fpr[i], tpr[i], _                       = roc_curve(targets[:,i], outputs[:,i])
+        aucs[i] = auc(fpr[i], tpr[i])
+        precision[i], recall[i], _              = precision_recall_curve(targets[:,i], outputs[:,i])
+        fpr[i], tpr[i], precision[i], recall[i] = fpr[i].tolist(), tpr[i].tolist(), precision[i].tolist(), recall[i].tolist()
+
+    metrics = {'fpr': fpr,
+               'tpr': tpr,
+               'aucs': aucs,
+               'precision': precision,
+               'recall': recall,
+              }
+
+    return metrics
 # --------------------
 # Train and evaluate
 # --------------------
