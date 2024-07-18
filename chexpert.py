@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 
 import os
 import pprint
@@ -170,9 +171,9 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
     model.train()
 
     with tqdm(total=len(train_dataloader), desc='Step at start {}; Training epoch {}/{}'.format(args.step, epoch+1, args.n_epochs)) as pbar:
-        for x, target, idxs in train_dataloader:
+        for x, target in train_dataloader:
             args.step += 1
-
+            target = target.float()
             out = model(x.to(args.device))
             loss = loss_fn(out, target.to(args.device)).sum(1).mean(0)
 
@@ -194,7 +195,7 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
                 with torch.no_grad():
                     model.eval()
 
-                    eval_metrics = evaluate_single_model(model, valid_dataloader, loss_fn, args)
+                    eval_metrics = evaluate_single_model(model, valid_dataloader, loss_fn, args.device)
 
                     writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
                     for k, v in eval_metrics['aucs'].items():
@@ -213,16 +214,17 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
                     model.train()
 
 @torch.no_grad()
-def evaluate(model, dataloader, loss_fn, args):
+def evaluate(model, dataloader, loss_fn, device):
     model.eval()
 
     targets, outputs, losses = [], [], []
-    for x, target, idxs in dataloader:
-        out = model(x.to(args.device))
-        loss = loss_fn(out, target.to(args.device))
-
+    for x, target in dataloader:
+        #import pdb;pdb.set_trace()
+        out = model(x.to(device))
+        target = target.float()
+        loss = loss_fn(out, target.to(device))
         outputs += [out.cpu()]
-        targets += [target]
+        targets += [target.cpu()]
         losses  += [loss.cpu()]
 
     return torch.cat(outputs), torch.cat(targets), torch.cat(losses)
@@ -231,26 +233,6 @@ def evaluate_single_model(model, dataloader, loss_fn, args):
     outputs, targets, losses = evaluate(model, dataloader, loss_fn, args)
     return compute_metrics(outputs, targets, losses)
 
-def evaluate_ensemble(model, dataloader, loss_fn, args):
-    checkpoints = [c for c in os.listdir(args.restore) \
-                        if c.startswith('checkpoint') and c.endswith('.pt')]
-    print('Running ensemble prediction using {} checkpoints.'.format(len(checkpoints)))
-    outputs, losses = [], []
-    for checkpoint in checkpoints:
-        # load weights
-        model_checkpoint = torch.load(os.path.join(args.restore, checkpoint), map_location=args.device)
-        model.load_state_dict(model_checkpoint['state_dict'])
-        del model_checkpoint
-        # evaluate
-        outputs_, targets, losses_ = evaluate(model, dataloader, loss_fn, args)
-        outputs += [outputs_]
-        losses  += [losses_]
-
-    # take mean over checkpoints
-    outputs  = torch.stack(outputs, dim=2).mean(2)
-    losses = torch.stack(losses, dim=2).mean(2)
-
-    return compute_metrics(outputs, targets, losses)
 
 def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, args):
     for epoch in range(args.n_epochs):

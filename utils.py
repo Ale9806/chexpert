@@ -43,14 +43,14 @@ def get_percentage(
         X_train, y_train = features,labels 
 
     else:
-        X_train, _, y_train,_ = train_test_split(
+        _, X_train,_,y_train = train_test_split(
             features, 
             labels, 
             test_size=percentage, 
             random_state=42)
 
     if verbose: 
-        print(f"Only using {X_train.shape}/{features.shape}")
+        print(f"Only using {X_train.shape}/{features.shape} or { (X_train.shape[0]/features.shape[0])*100} % of data" )
   
     return X_train,y_train
 
