@@ -2,6 +2,7 @@ import torch
 import sys
 from pathlib import Path
 from transformers import CLIPProcessor, CLIPModel
+from PIL import Image
 
 FIXTURES_PATH = str(Path(__file__).resolve().parent)
 sys.path.append(FIXTURES_PATH)
@@ -11,9 +12,18 @@ from baseclip import BaseCLIP
 class CLIP(BaseCLIP):
     def __init__(self,eval_mode:bool=True,context_length:int=77,verbose:bool=True):
         super().__init__(eval_mode,context_length,verbose)
-        self.model     = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        self.model      = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         self.preprocess = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
         self.load_model()
+
+    def forward_vision_only(self,images:list[str]) -> dict[str,list[float]]:
+        images = Image.open(images)
+        processed_images = self.preprocess(images=images, return_tensors="pt").to(self.device)
+
+    
+        with torch.no_grad():
+            image_features  = self.model.get_image_features(**processed_images).detach().to("cpu")
+            return image_features
 
     def forward(self,images:list[str], texts:list[str]) -> dict[str,list[float]]:
         """
@@ -49,3 +59,9 @@ if __name__ == "__main__":
     output:dict       = model.forward(images[0],prompts)
     print(output)
     import pdb;pdb.set_trace()
+
+# Vision Only:
+# Resnet-
+# Desnet
+
+#

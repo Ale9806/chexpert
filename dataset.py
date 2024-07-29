@@ -12,7 +12,27 @@ from PIL import Image
 
 import torch
 from torch.utils.data import Dataset
+import pdb
 
+def extract_patient_ids(dataset, idxs):
+    # extract a list of patient_id for prediction/eval results as ['CheXpert-v1.0-small/valid/patient64541/study1', ...]
+    #    extract from image path = 'CheXpert-v1.0-small/valid/patient64541/study1/view1_frontal.jpg'
+    #    NOTE -- patient_id is non-unique as there can be multiple views under the same study
+    return dataset.data['Path'].loc[idxs].str.rsplit('/', expand=True, n=1)[0].values
+
+
+def compute_mean_and_std(dataset):
+    m = 0
+    s = 0
+    k = 1
+    for img, _, _ in tqdm(dataset):
+        x = img.mean().item()
+        new_m = m + (x - m)/k
+        s += (x - m)*(x - new_m)
+        m = new_m
+        k += 1
+    print('Number of datapoints: ', k)
+    return m, math.sqrt(s/(k-1))
 
 class ChexpertSmall(Dataset):
     url = 'http://download.cs.stanford.edu/deep/CheXpert-v1.0-small.zip'
@@ -25,51 +45,26 @@ class ChexpertSmall(Dataset):
     attr_names = ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Pleural Effusion']
 
     def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None,return_path=False):
+        assert mode in ['train', 'valid', 'test', 'vis']
         self.root = os.path.expanduser(root)
         self.transform = transform
-        assert mode in ['train', 'valid', 'test', 'vis']
         self.mode = mode
         self.return_path = return_path
+        self._maybe_download_and_extract()
+        self._maybe_process(data_filter)
 
-        # if mode is test; root is path to csv file (in test mode), construct dataset from this csv;
-        # if mode is train/valid; root is path to data folder with `train`/`valid` csv file to construct dataset.
-        if mode == 'test':
-            self.data = pd.read_csv(self.root, keep_default_na=True)
-            self.root = '.'  # base path; to be joined to filename in csv file in __getitem__
-            self.data[self.attr_names] = pd.DataFrame(np.zeros((len(self.data), len(self.attr_names))))  # attr is vector of 0s under test
-        else:
-            self._maybe_download_and_extract()
-            self._maybe_process(data_filter)
+        data_file = os.path.join(self.root, self.dir_name, f'{mode}.pt')
+        self.data:pd.DataFrame = torch.load(data_file) # Loads preprocessed CSV
 
-            data_file = os.path.join(self.root, self.dir_name, 'valid.pt' if mode in ['valid', 'vis'] else 'train.pt')
-            self.data = torch.load(data_file)
+        if mini_data is not None:
+            # truncate data to only a subset for debugging
+            self.data = self.data[:mini_data]
 
-            if mini_data is not None:
-                # truncate data to only a subset for debugging
-                self.data = self.data[:mini_data]
-
-            if mode=='vis':
-                # select a subset of the data to visualize:
-                #   3 examples from each condition category + no finding category + multiple conditions category
-
-                # 1. get data idxs with a/ only 1 condition, b/ no findings, c/ 2 conditions, d/ >2 conditions; return list of lists
-                idxs = []
-                data = self.data
-                for attr in self.attr_names:                                                               # 1 only condition category
-                    idxs.append(self.data.loc[(self.data[attr]==1) & (self.data[self.attr_names].sum(1)==1), self.attr_names].head(3).index.tolist())
-                idxs.append(self.data.loc[self.data[self.attr_names].sum(1)==0, self.attr_names].head(3).index.tolist())  # no findings category
-                idxs.append(self.data.loc[self.data[self.attr_names].sum(1)==2, self.attr_names].head(3).index.tolist())  # 2 conditions category
-                idxs.append(self.data.loc[self.data[self.attr_names].sum(1)>2, self.attr_names].head(3).index.tolist())   # >2 conditions category
-                # save labels to visualize with a list of list of the idxs corresponding to each attribute
-                self.vis_attrs = self.attr_names + ['No findings', '2 conditions', 'Multiple conditions']
-                self.vis_idxs = idxs
-
-                # 2. select only subset
-                idxs_flatten = torch.tensor([i for sublist in idxs for i in sublist])
-                self.data = self.data.iloc[idxs_flatten]
 
         # store index of the selected attributes in the columns of the data for faster indexing
         self.attr_idxs = [self.data.columns.tolist().index(a) for a in self.attr_names]
+    
+        
 
     def __getitem__(self, idx):
         # 1. select and load image
@@ -115,6 +110,7 @@ class ChexpertSmall(Dataset):
                     os.rmdir(os.path.join(self.root, self.dir_name, '__MACOSX'))
             os.unlink(fpath)
             print('Dataset extracted.')
+            print("Test set has to be extrqacted from the orignial Chexpert Website :)")
 
     def _maybe_process(self, data_filter):
         # Dataset labels are: blank for unmentioned, 0 for negative, -1 for uncertain, and 1 for positive.
@@ -126,6 +122,9 @@ class ChexpertSmall(Dataset):
         # check for processed .pt files
         train_file = os.path.join(self.root, self.dir_name, 'train.pt')
         valid_file = os.path.join(self.root, self.dir_name, 'valid.pt')
+        test_file  = os.path.join(self.root, self.dir_name, 'test.pt')
+
+
         if not (os.path.exists(train_file) and os.path.exists(valid_file)):
             # load data and preprocess training data
             valid_df = pd.read_csv(os.path.join(self.root, self.dir_name, 'valid.csv'), keep_default_na=True)
@@ -134,6 +133,13 @@ class ChexpertSmall(Dataset):
             # save
             torch.save(train_df, train_file)
             torch.save(valid_df, valid_file)
+
+        if not os.path.exists(test_file):
+            test_df = pd.read_csv(os.path.join(self.root, self.dir_name, 'test.csv'), keep_default_na=True)
+            test_df['Path'] =  'CheXpert-v1.0-small/' + test_df['Path'] # add CheXpert-v1.0-small/ to every string in Path in chexpert_labelss datafame      
+            torch.save(test_df,test_file)
+
+
 
     def _load_and_preprocess_training_data(self, csv_path, data_filter):
         train_df = pd.read_csv(csv_path, keep_default_na=True)
@@ -156,26 +162,133 @@ class ChexpertSmall(Dataset):
 
         return train_df
 
+class ChexpertSmallInspect(Dataset):
+    url = 'http://download.cs.stanford.edu/deep/CheXpert-v1.0-small.zip'
+    dir_name = os.path.splitext(os.path.basename(url))[0]  # folder to match the filename
+    attr_all_names = ["12_month_mortality",  
+                        "12_month_readmission", 
+                        "1_month_readmission", 
+                        "6_month_readmission",
+                        "12_month_PH",         
+                        "1_month_mortality",   
+                        "6_month_mortality"]
 
-def extract_patient_ids(dataset, idxs):
-    # extract a list of patient_id for prediction/eval results as ['CheXpert-v1.0-small/valid/patient64541/study1', ...]
-    #    extract from image path = 'CheXpert-v1.0-small/valid/patient64541/study1/view1_frontal.jpg'
-    #    NOTE -- patient_id is non-unique as there can be multiple views under the same study
-    return dataset.data['Path'].loc[idxs].str.rsplit('/', expand=True, n=1)[0].values
+
+    # select only the competition labels
+    attr_names =["12_month_mortality",  
+                        "12_month_readmission", 
+                        "1_month_readmission", 
+                        "6_month_readmission",
+                        "12_month_PH",         
+                        "1_month_mortality",   
+                        "6_month_mortality"]
+   
+
+    def __init__(self, root, mode='train', transform=None, data_filter=None, mini_data=None,return_path=False):
+        assert mode in ['train', 'valid', 'test']
+        self.root = os.path.expanduser(root)
+        self.transform = transform
+        self.mode = mode
+        self.return_path = return_path
+        self.data = self.merge_data(mode)
+
+        # store index of the selected attributes in the columns of the data for faster indexing
+        self.attr_idxs = [self.data.columns.tolist().index(a) for a in self.attr_names]
+
+        #import pdb;pdb.set_trace()
+    
+
+    def merge_data(self,mode:str,how:str="inner") -> pd.DataFrame:
+        inspect_labels:pd.DataFrame  = self.get_labels(mode)
+        data_filepath:str            = os.path.join(self.root, self.dir_name, f'{mode}.pt')
+        chexpert_labels:pd.DataFrame = torch.load(data_filepath)
+        merged_df:pd.DataFrame  = pd.merge(chexpert_labels, inspect_labels, on="Path", how="inner")
+
+        #simport pdb;pdb.set_trace()
+        #merged_labels.to_csv('out.csv')  
+
+        merged_df = merged_df.fillna(-1)
+        return merged_df
 
 
-def compute_mean_and_std(dataset):
-    m = 0
-    s = 0
-    k = 1
-    for img, _, _ in tqdm(dataset):
-        x = img.mean().item()
-        new_m = m + (x - m)/k
-        s += (x - m)*(x - new_m)
-        m = new_m
-        k += 1
-    print('Number of datapoints: ', k)
-    return m, math.sqrt(s/(k-1))
+    def split_path_column(self,df,attribute,chexpert:str="CheXpert-v1.0-small"):
+
+        # Check if 'Path' column exists
+        if 'Path' not in df.columns:
+            raise ValueError("The DataFrame does not contain a 'Path' column.")
+     
+        df["value"] = df["value"].astype(int)
+        df.rename(columns={'value':attribute}, inplace=True)   
+       
+        # Initialize new columns
+        df['split'] = ''
+        df['CPath'] = ''
+
+        # Iterate over each row in the DataFrame
+        for index, row in df.iterrows():
+            path_split = row['Path'].split('/')
+            
+            # Assign new values to the DataFrame
+            df.at[index, 'split'] = path_split[1]
+            df.at[index, 'CPath'] = f"{chexpert}/{path_split[1]}/{path_split[2]}/{path_split[3]}/{path_split[4]}"
+        
+        # Remove unecssary columns
+        df.drop(['label_type',"Path","patient_id",'prediction_time', 'split'], axis = 1, inplace = True) 
+       
+
+    def get_labels(self,mode:str=None) -> dict:
+        merged_df = None
+        for attribute in self.attr_names:
+            data_path = os.path.join(self.root,"CheXpert-v1.0-small","inspect_labels",f"{attribute}.csv")
+            df        =   pd.read_csv(data_path, keep_default_na=True)
+            self.split_path_column(df,attribute)
+
+            if merged_df is None:
+                merged_df = df
+            else:
+                merged_df = pd.merge(merged_df, df, on="CPath", how="outer")
+
+        merged_df.rename(columns={"CPath":"Path"}, inplace=True)
+        merged_df['Path'] = merged_df['Path'].str.replace('test-patient', 'test')
+        merged_df['Path'] = merged_df['Path'].str.replace('valid-patient', 'valid')
+
+        if mode:
+            merged_df = merged_df[merged_df['Path'].str.contains(mode)]
+  
+
+        return merged_df
+        
+
+ 
+
+
+    def __getitem__(self, idx):
+        # 1. select and load image
+        img_path = self.data.iloc[idx, 0]  # 'Path' column is 0
+        img = Image.open(os.path.join(self.root, img_path))
+        if self.transform is not None:
+            img = self.transform(img)
+
+        # 2. select attributes as targets
+        attr = self.data.iloc[idx, self.attr_idxs].values.astype(np.float32)
+        attr = torch.from_numpy(attr)
+
+        # 3. save index for extracting the patient_id in prediction/eval results as 'CheXpert-v1.0-small/valid/patient64541/study1'
+        #    performed using the extract_patient_ids function
+        idx = self.data.index[idx]  # idx is based on len(self.data); if we are taking a subset of the data, idx will be relative to len(subset);
+                                    # self.data.index(idx) pulls the index in the original dataframe and not the subset
+
+        if self.return_path:
+            img = img_path 
+            
+        return img, attr, idx
+
+    def __len__(self):
+        return len(self.data)
+
+
+
+
 
 
 if __name__ == '__main__':

@@ -48,8 +48,8 @@ parser.add_argument('--mini_data', type=int, help='Truncate dataset to this numb
 parser.add_argument('--resize', type=int, help='Size of minimum edge to which to resize images.')
 # training params
 parser.add_argument('--pretrained', action='store_true', help='Use ImageNet pretrained model and normalize data mean and std.')
-parser.add_argument('--batch_size', type=int, default=16, help='Dataloaders batch size.')
-parser.add_argument('--n_epochs', type=int, default=1, help='Number of epochs to train.')
+parser.add_argument('--batch_size', type=int, default=64, help='Dataloaders batch size.')
+parser.add_argument('--n_epochs', type=int, default=60, help='Number of epochs to train.')
 parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate.')
 parser.add_argument('--lr_warmup_steps', type=float, default=0, help='Linear warmup of the learning rate for lr_warmup_steps number of steps.')
 parser.add_argument('--lr_decay_factor', type=float, default=0.97, help='Decay factor if exponential learning rate decay scheduler.')
@@ -92,8 +92,11 @@ def save_checkpoint(checkpoint, optim_checkpoint, sched_checkpoint, args, max_re
     """ save model and optimizer checkpoint along with csv tracker
     of last `max_records` best number of checkpoints as sorted by avg auc """
     # 1. save latest
-    torch.save(checkpoint, os.path.join(args.output_dir, 'checkpoint_latest.pt'))
-    torch.save(optim_checkpoint, os.path.join(args.output_dir, 'optim_checkpoint_latest.pt'))
+    try:
+        torch.save(checkpoint, os.path.join(args.output_dir, 'checkpoint_latest.pt'))
+        torch.save(optim_checkpoint, os.path.join(args.output_dir, 'optim_checkpoint_latest.pt'))
+    except:
+        print("could not save model")
     if sched_checkpoint: torch.save(sched_checkpoint, os.path.join(args.output_dir, 'sched_checkpoint_latest.pt'))
 
     # 2. save the last `max_records` number of checkpoints as sorted by avg auc
@@ -129,12 +132,21 @@ def save_checkpoint(checkpoint, optim_checkpoint, sched_checkpoint, args, max_re
 # --------------------
 
 def compute_metrics(outputs, targets, losses):
+
     n_classes = outputs.shape[1]
     fpr, tpr, aucs, precision, recall = {}, {}, {}, {}, {}
     for i in range(n_classes):
-        fpr[i], tpr[i], _ = roc_curve(targets[:,i], outputs[:,i])
+        #import pdb;pdb.set_trace()
+        targets_i = targets[:,i]
+        outputs_i = outputs[:,i]
+        if -1 in targets:
+            step_mask =  targets_i  != -1
+            targets_i =  targets_i[step_mask]  
+            outputs_i =  outputs_i[step_mask]  
+
+        fpr[i], tpr[i], _ = roc_curve(targets_i,outputs_i)
         aucs[i] = auc(fpr[i], tpr[i])
-        precision[i], recall[i], _ = precision_recall_curve(targets[:,i], outputs[:,i])
+        precision[i], recall[i], _ = precision_recall_curve(targets_i, outputs_i)
         fpr[i], tpr[i], precision[i], recall[i] = fpr[i].tolist(), tpr[i].tolist(), precision[i].tolist(), recall[i].tolist()
 
     metrics = {'fpr': fpr,
@@ -150,6 +162,8 @@ def compute_all_metrics(outputs, targets):
     n_classes = outputs.shape[1]
     fpr, tpr, aucs, precision, recall = {}, {}, {}, {}, {}
     for i in range(n_classes):
+   
+        
         fpr[i], tpr[i], _                       = roc_curve(targets[:,i], outputs[:,i])
         aucs[i] = auc(fpr[i], tpr[i])
         precision[i], recall[i], _              = precision_recall_curve(targets[:,i], outputs[:,i])
@@ -167,16 +181,33 @@ def compute_all_metrics(outputs, targets):
 # Train and evaluate
 # --------------------
 
-def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, scheduler, writer, epoch, args):
+def train_epoch(
+        model, 
+        train_dataloader, 
+        valid_dataloader, 
+        loss_fn, 
+        optimizer, 
+        scheduler, 
+        writer, 
+        epoch, 
+        args):
     model.train()
 
     with tqdm(total=len(train_dataloader), desc='Step at start {}; Training epoch {}/{}'.format(args.step, epoch+1, args.n_epochs)) as pbar:
         for x, target in train_dataloader:
             args.step += 1
             target = target.float()
+            target = target.to(args.device)
             out = model(x.to(args.device))
-            loss = loss_fn(out, target.to(args.device)).sum(1).mean(0)
+            if args.mask:
+                step_mask = (target != -1)*1
+                step_mask = step_mask.to(args.device)
+                out      =  out*step_mask
+                target   = step_mask*target
+           
 
+            loss = loss_fn(out, target).sum(1).mean(0)
+    
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -187,8 +218,9 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
 
             # record
             if args.step % args.log_interval == 0:
-                writer.add_scalar('train_loss', loss.item(), args.step)
-                writer.add_scalar('lr', optimizer.param_groups[0]['lr'], args.step)
+                pass
+                #writer.add_scalar('train_loss', loss.item(), args.step)
+                #writer.add_scalar('lr', optimizer.param_groups[0]['lr'], args.step)
 
             # evaluate and save on eval_interval
             if args.step % args.eval_interval == 0:
@@ -197,18 +229,18 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
 
                     eval_metrics = evaluate_single_model(model, valid_dataloader, loss_fn, args.device)
 
-                    writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
-                    for k, v in eval_metrics['aucs'].items():
-                        writer.add_scalar('eval_auc_class_{}'.format(k), v, args.step)
+                    #writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
+                    #for k, v in eval_metrics['aucs'].items():
+                        #writer.add_scalar('eval_auc_class_{}'.format(k), v, args.step)
 
                     # save model
-                    save_checkpoint(checkpoint={'global_step': args.step,
-                                                'eval_loss': np.sum(list(eval_metrics['loss'].values())),
-                                                'avg_auc': np.nanmean(list(eval_metrics['aucs'].values())),
-                                                'state_dict': model.state_dict()},
-                                    optim_checkpoint=optimizer.state_dict(),
-                                    sched_checkpoint=scheduler.state_dict() if scheduler else None,
-                                    args=args)
+                    #save_checkpoint(checkpoint={'global_step': args.step,
+                    #                            'eval_loss': np.sum(list(eval_metrics['loss'].values())),
+                    #                            'avg_auc': np.nanmean(list(eval_metrics['aucs'].values())),
+                    #                           'state_dict': model.state_dict()},
+                    #                optim_checkpoint=optimizer.state_dict(),
+                    #                sched_checkpoint=scheduler.state_dict() if scheduler else None,
+                    #                args=args)
 
                     # switch back to train mode
                     model.train()
@@ -217,15 +249,29 @@ def train_epoch(model, train_dataloader, valid_dataloader, loss_fn, optimizer, s
 def evaluate(model, dataloader, loss_fn, device):
     model.eval()
 
+    mask = True
+
     targets, outputs, losses = [], [], []
     for x, target in dataloader:
         #import pdb;pdb.set_trace()
-        out = model(x.to(device))
+        out    = model(x.to(device))
         target = target.float()
-        loss = loss_fn(out, target.to(device))
+        target = target.to(device)
+
+        if mask:
+            step_mask = (target != -1)*1
+            step_mask = step_mask.to(device)
+            out_masked     =  out*step_mask
+            target_masked  = step_mask*target
+            loss = loss_fn(out_masked, target_masked)
+         
+        else:
+            loss = loss_fn(out, target)
+            
         outputs += [out.cpu()]
         targets += [target.cpu()]
         losses  += [loss.cpu()]
+       
 
     return torch.cat(outputs), torch.cat(targets), torch.cat(losses)
 
@@ -245,9 +291,9 @@ def train_and_evaluate(model, train_dataloader, valid_dataloader, loss_fn, optim
         print('Evaluate metrics @ step {}:'.format(args.step))
         print('AUC:\n', pprint.pformat(eval_metrics['aucs']))
         print('Loss:\n', pprint.pformat(eval_metrics['loss']))
-        writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
-        for k, v in eval_metrics['aucs'].items():
-            writer.add_scalar('eval_auc_class_{}'.format(k), v, args.step)
+        #writer.add_scalar('eval_loss', np.sum(list(eval_metrics['loss'].values())), args.step)
+        #for k, v in eval_metrics['aucs'].items():
+         #   writer.add_scalar('eval_auc_class_{}'.format(k), v, args.step)
 
         # save eval metrics
         save_json(eval_metrics, 'eval_results_step_{}'.format(args.step), args)
@@ -425,6 +471,44 @@ def plot_roc(metrics, args, filename, labels=ChexpertSmall.attr_names):
     plt.savefig(os.path.join(args.output_dir, 'plots', filename + '.png'), pad_inches=0.)
     plt.close()
 
+
+def plot_roc_multiple_seeds(metrics,bootstrap,args, filename, labels=ChexpertSmall.attr_names):
+    fig, axs = plt.subplots(2, len(labels), figsize=(24,12))
+    for seed, metric in metrics.items():
+       
+        for i, (fpr, tpr, aucs, precision, recall, label) in enumerate(zip(metric['fpr'].values(),
+                                                                           metric['tpr'].values(),
+                                                                           metric['aucs'].values(), 
+                                                                           metric['precision'].values(),
+                                                                           metric['recall'].values(), 
+                                                                           labels)):
+            #import pdb;pdb.set_trace()
+            # top row -- ROC
+            axs[0,i].plot(fpr, tpr, label='AUC = %0.2f' % aucs)
+            axs[0,i].plot([0, 1], [0, 1], 'k--')  # diagonal margin
+            axs[0,i].set_xlabel('False Positive Rate')
+            # bottom row - Precision-Recall
+            axs[1,i].step(recall, precision, where='post')
+            axs[1,i].set_xlabel('Recall')
+            # format
+            mean  = np.round(bootstrap[i]['mean'],2) 
+            low   = np.round(bootstrap[i]['low'],2) 
+            high  = np.round(bootstrap[i]['high'],2) 
+            axs[0,i].set_title(label + f": {mean} ({low},{high})")
+            #axs[0,i].legend(loc="lower right")
+
+    plt.suptitle(filename)
+    axs[0,0].set_ylabel('True Positive Rate')
+    axs[1,0].set_ylabel('Precision')
+
+    for ax in axs.flatten():
+        ax.set_xlim([0.0, 1.05])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_aspect('equal')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.output_dir, 'plots', filename + '.png'), pad_inches=0.)
+    plt.close()
 # --------------------
 # Main
 # --------------------
@@ -440,14 +524,15 @@ if __name__ == '__main__':
         if args.restore: raise RuntimeError('Must specify `output_dir` argument')
         args.output_dir: args.output_dir = os.path.join('results', time.strftime('%Y-%m-%d_%H-%M-%S', time.gmtime()))
     # make new folders if they don't exist
-    writer = SummaryWriter(logdir=args.output_dir)  # creates output_dir
+    #writer = SummaryWriter(logdir=args.output_dir)  # creates output_dir
+    writer = None
     if not os.path.exists(os.path.join(args.output_dir, 'vis')): os.makedirs(os.path.join(args.output_dir, 'vis'))
     if not os.path.exists(os.path.join(args.output_dir, 'plots')): os.makedirs(os.path.join(args.output_dir, 'plots'))
     if not os.path.exists(os.path.join(args.output_dir, 'best_checkpoints')): os.makedirs(os.path.join(args.output_dir, 'best_checkpoints'))
 
     # save config
     if not os.path.exists(os.path.join(args.output_dir, 'config.json')): save_json(args.__dict__, 'config', args)
-    writer.add_text('config', str(args.__dict__))
+    #writer.add_text('config', str(args.__dict__))
 
     args.device = torch.device('cuda:{}'.format(args.cuda) if args.cuda is not None and torch.cuda.is_available() else 'cpu')
 
@@ -569,4 +654,4 @@ if __name__ == '__main__':
         for f in filenames:
             plot_roc(load_json(os.path.join(args.output_dir, f)), args, 'roc_pr_' + f.split('.')[0])
 
-    writer.close()
+   # writer.close()
